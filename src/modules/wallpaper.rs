@@ -151,3 +151,4 @@ pub fn apply_system_wallpaper(path: &std::path::Path) {
         );
     }
 }
+

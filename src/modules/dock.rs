@@ -168,10 +168,10 @@ impl MagnifyingDock {
             } else {
                 // Minimalist vector app squircle with accent gradient
                 let hue_colors = [
-                    Color::from_rgba(0.2, 0.5, 0.95, 0.95).unwrap_or(Color::BLUE),
-                    Color::from_rgba(0.95, 0.35, 0.25, 0.95).unwrap_or(Color::RED),
-                    Color::from_rgba(0.15, 0.8, 0.45, 0.95).unwrap_or(Color::GREEN),
-                    Color::from_rgba(0.65, 0.35, 0.95, 0.95).unwrap_or(Color::WHITE),
+                    Color::from_rgba8(50, 128, 245, 240),
+                    Color::from_rgba8(245, 90, 65, 240),
+                    Color::from_rgba8(40, 205, 115, 240),
+                    Color::from_rgba8(165, 90, 245, 240),
                 ];
                 let color = hue_colors[i % hue_colors.len()];
                 draw_glass_squircle(pixmap, current_x, icon_y, size, size, radius, color, 0.8);

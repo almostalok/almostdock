@@ -144,7 +144,7 @@ impl DesktopWidgets {
             64.0,
             18.0,
             9.0,
-            Color::from_rgba(0.2, 0.65, 0.35, 0.8).unwrap_or(Color::GREEN),
+            Color::from_rgba8(50, 165, 90, 204),
             0.5,
         );
         font.draw_text(
@@ -177,9 +177,9 @@ impl DesktopWidgets {
 
             // Checkbox
             let check_bg = if reminder.completed {
-                Color::from_rgba(0.3, 0.7, 1.0, 0.95).unwrap_or(Color::BLUE)
+                Color::from_rgba8(75, 180, 255, 240)
             } else {
-                Color::from_rgba(0.2, 0.22, 0.28, 0.8).unwrap_or(Color::BLACK)
+                Color::from_rgba8(50, 55, 70, 204)
             };
             draw_glass_squircle(pixmap, rem_x + 20.0, item_y - 12.0, 16.0, 16.0, 8.0, check_bg, 0.6);
 

@@ -7,7 +7,7 @@ pub fn build_squircle_path(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Optio
     let mut pb = PathBuilder::new();
 
     // macOS continuous curvature smooth squircle approximation using cubic Bézier curves
-    let k = 0.55228475 * (r / radius); // Bézier circle constant adapted for squircle curvature
+    let k = 0.552_284_8 * (r / radius); // Bézier circle constant adapted for squircle curvature
 
     pb.move_to(x + r, y);
     pb.line_to(x + w - r, y);
@@ -26,6 +26,7 @@ pub fn build_squircle_path(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Optio
     pb.finish()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw_glass_squircle(
     pixmap: &mut PixmapMut,
     x: f32,
@@ -80,3 +81,4 @@ pub fn copy_pixmap_to_softbuffer(pixmap: &tiny_skia::Pixmap, buffer: &mut [u32])
         buffer[i] = (r << 16) | (g << 8) | b;
     }
 }
+

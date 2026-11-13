@@ -1,9 +1,9 @@
 use std::ffi::c_void;
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Graphics::Dwm::{
-    DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE,
-    DWMWA_WINDOW_CORNER_PREFERENCE,
+    DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
 };
+use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, HWND_BOTTOM, HWND_TOPMOST,
     SWP_NOMOVE, SWP_NOSIZE, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
@@ -21,20 +21,23 @@ pub const DWMSBT_TABBEDWINDOW: u32 = 4; // Mica Alt
 pub const DWMWCP_ROUND: u32 = 2;
 
 #[repr(C)]
-struct Margins {
-    cx_left_width: i32,
-    cx_right_width: i32,
-    cy_top_height: i32,
-    cy_bottom_height: i32,
+pub struct Margins {
+    pub cx_left_width: i32,
+    pub cx_right_width: i32,
+    pub cy_top_height: i32,
+    pub cy_bottom_height: i32,
 }
 
+type PfnDwmExtendFrameIntoClientArea = unsafe extern "system" fn(HWND, *const Margins) -> i32;
+
+#[allow(clippy::manual_c_str_literals)]
 pub fn enable_acrylic_glass(hwnd: HWND, dark_mode: bool) {
     unsafe {
         // 1. Enable immersive dark mode
         let dark: u32 = if dark_mode { 1 } else { 0 };
         DwmSetWindowAttribute(
             hwnd,
-            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
             &dark as *const _ as *const c_void,
             std::mem::size_of::<u32>() as u32,
         );
@@ -43,7 +46,7 @@ pub fn enable_acrylic_glass(hwnd: HWND, dark_mode: bool) {
         let corner = DWMWCP_ROUND;
         DwmSetWindowAttribute(
             hwnd,
-            DWMWA_WINDOW_CORNER_PREFERENCE,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
             &corner as *const _ as *const c_void,
             std::mem::size_of::<u32>() as u32,
         );
@@ -57,14 +60,21 @@ pub fn enable_acrylic_glass(hwnd: HWND, dark_mode: bool) {
             std::mem::size_of::<u32>() as u32,
         );
 
-        // 4. Extend frame into entire client area
-        let margins = Margins {
-            cx_left_width: -1,
-            cx_right_width: -1,
-            cy_top_height: -1,
-            cy_bottom_height: -1,
-        };
-        DwmExtendFrameIntoClientArea(hwnd, &margins as *const _ as *const _);
+        // 4. Extend frame into entire client area (dynamic resolution)
+        let dwm_module = LoadLibraryA(b"dwmapi.dll\0".as_ptr());
+        if dwm_module != 0 {
+            let proc = GetProcAddress(dwm_module, b"DwmExtendFrameIntoClientArea\0".as_ptr());
+            if let Some(func) = proc {
+                let extend_frame: PfnDwmExtendFrameIntoClientArea = std::mem::transmute(func);
+                let margins = Margins {
+                    cx_left_width: -1,
+                    cx_right_width: -1,
+                    cy_top_height: -1,
+                    cy_bottom_height: -1,
+                };
+                extend_frame(hwnd, &margins);
+            }
+        }
     }
 }
 

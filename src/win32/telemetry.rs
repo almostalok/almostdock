@@ -1,8 +1,18 @@
 use std::mem::size_of;
-use windows_sys::Win32::Foundation::{FILETIME, HANDLE};
+use windows_sys::Win32::Foundation::{BOOL, FILETIME, HANDLE};
 use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
-use windows_sys::Win32::System::SystemInformation::GetSystemTimes;
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSizeEx};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetSystemTimes(
+        lpIdleTime: *mut FILETIME,
+        lpKernelTime: *mut FILETIME,
+        lpUserTime: *mut FILETIME,
+    ) -> BOOL;
+
+    fn K32EmptyWorkingSet(hProcess: HANDLE) -> BOOL;
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MemoryTelemetry {
@@ -47,18 +57,12 @@ pub fn get_process_memory() -> MemoryTelemetry {
 
 pub fn trim_working_set() {
     let handle = unsafe { GetCurrentProcess() };
-    // Empty working set and disable hard working set limits to release pages to system cache
-    const QUOTA_LIMITS_HARDWS_MIN_DISABLE: u32 = 0x00000002;
-    const QUOTA_LIMITS_HARDWS_MAX_DISABLE: u32 = 0x00000008;
-
     unsafe {
-        // usize::MAX as size_t (-1) signals Windows to trim the working set completely
-        SetProcessWorkingSetSizeEx(
-            handle,
-            usize::MAX,
-            usize::MAX,
-            QUOTA_LIMITS_HARDWS_MIN_DISABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE,
-        );
+        // 1. Flush memory pages using PSAPI EmptyWorkingSet
+        K32EmptyWorkingSet(handle);
+
+        // 2. Set min/max working set to (size_t)-1 to purge standby memory
+        SetProcessWorkingSetSize(handle, usize::MAX, usize::MAX);
     }
 }
 

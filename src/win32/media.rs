@@ -25,16 +25,9 @@ impl Default for MediaSessionState {
     }
 }
 
+#[derive(Default)]
 pub struct MediaBridge {
     pub state: MediaSessionState,
-}
-
-impl Default for MediaBridge {
-    fn default() -> Self {
-        Self {
-            state: MediaSessionState::default(),
-        }
-    }
 }
 
 impl MediaBridge {
@@ -73,3 +66,4 @@ impl MediaBridge {
         }
     }
 }
+

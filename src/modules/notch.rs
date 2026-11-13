@@ -267,3 +267,4 @@ impl DynamicNotch {
         }
     }
 }
+

@@ -146,12 +146,12 @@ impl AppLauncher {
             return None;
         }
 
-        let pixmap = self.surface.as_mut()?;
-        pixmap.fill(Color::TRANSPARENT);
+        let mut surface = self.surface.take()?;
+        surface.fill(Color::TRANSPARENT);
 
-        let mut mut_view = pixmap.as_mut();
-        self.render_contents(&mut mut_view, font);
+        self.render_contents(&mut surface.as_mut(), font);
 
+        self.surface = Some(surface);
         self.surface.as_ref()
     }
 
@@ -219,7 +219,7 @@ impl AppLauncher {
                     icon_size + 12.0,
                     icon_size + 12.0,
                     18.0,
-                    Color::from_rgba(0.2, 0.5, 1.0, 0.45).unwrap_or(Color::BLUE),
+                    Color::from_rgba8(50, 128, 255, 115),
                     1.0,
                 );
             }

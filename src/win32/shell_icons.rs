@@ -3,12 +3,36 @@ use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Graphics::Gdi::{
     CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO,
     BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
 };
-use windows_sys::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
-use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, ICONINFO};
+use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
+
+pub const SHGFI_ICON: u32 = 0x000000100;
+pub const SHGFI_LARGEICON: u32 = 0x000000000;
+
+#[repr(C)]
+#[allow(non_snake_case)]
+pub struct SHFILEINFOW {
+    pub hIcon: HICON,
+    pub iIcon: i32,
+    pub dwAttributes: u32,
+    pub szDisplayName: [u16; 260],
+    pub szTypeName: [u16; 80],
+}
+
+#[link(name = "shell32")]
+extern "system" {
+    fn SHGetFileInfoW(
+        pszPath: *const u16,
+        dwFileAttributes: u32,
+        psfi: *mut SHFILEINFOW,
+        cbFileInfo: u32,
+        uFlags: u32,
+    ) -> usize;
+}
 
 #[derive(Clone, Debug)]
 pub struct AppInfo {
@@ -82,7 +106,7 @@ pub fn scan_start_menu_apps() -> Vec<AppInfo> {
         }
     }
 
-    apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    apps.sort_by_key(|a| a.name.to_lowercase());
     apps.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
     apps
 }
@@ -148,7 +172,7 @@ pub fn extract_hicon_rgba(path: &Path) -> Option<Vec<u8>> {
     let hbm_color = icon_info.hbmColor;
     let hbm_mask = icon_info.hbmMask;
 
-    let hdc = unsafe { CreateCompatibleDC(0) };
+    let hdc = unsafe { CreateCompatibleDC(0 as HWND) };
     if hdc == 0 {
         unsafe {
             if hbm_color != 0 {

@@ -13,7 +13,7 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Event, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowBuilder};
+use winit::window::WindowBuilder;
 
 pub mod config;
 pub mod error;
@@ -133,7 +133,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let mut last_frame = Instant::now();
-    let mut needs_animation = true;
 
     event_loop.run(move |event, elwt| {
         match event {
@@ -145,12 +144,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match window_event {
                         WindowEvent::CursorMoved { position, .. } => {
                             dock.set_mouse_position(Some(position.x as f32));
-                            needs_animation = true;
                             dock_window.request_redraw();
                         }
                         WindowEvent::CursorLeft { .. } => {
                             dock.set_mouse_position(None);
-                            needs_animation = true;
                             dock_window.request_redraw();
                         }
                         WindowEvent::MouseInput {
@@ -183,12 +180,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match window_event {
                         WindowEvent::CursorEntered { .. } => {
                             notch.set_hovered(true);
-                            needs_animation = true;
                             notch_window.request_redraw();
                         }
                         WindowEvent::CursorLeft { .. } => {
                             notch.set_hovered(false);
-                            needs_animation = true;
                             notch_window.request_redraw();
                         }
                         WindowEvent::MouseInput {
@@ -272,7 +267,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     notch_window.request_redraw();
                 }
 
-                needs_animation = dock_anim || notch_anim;
+                let needs_animation = dock_anim || notch_anim;
 
                 // STRICT CPU BUDGET: Wait until next frame if animating, else wait indefinitely
                 if needs_animation {
@@ -289,3 +284,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+

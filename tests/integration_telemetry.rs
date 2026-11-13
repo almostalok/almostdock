@@ -152,3 +152,4 @@ fn test_launcher_surface_destruction() {
     assert!(!launcher.is_open);
     assert!(launcher.surface.is_none());
 }
+

@@ -96,7 +96,8 @@ fn test_wallpaper_procedural_generation() {
     // BMP minimum header size is 54 bytes
     assert!(bytes.len() > 54);
 
-    let expected_row_padding = (4 - ((640 * 3) % 4)) % 4;
+    let unpadded_row = 640 * 3;
+    let expected_row_padding = if unpadded_row % 4 == 0 { 0 } else { 4 - (unpadded_row % 4) };
     let expected_row_size = 640 * 3 + expected_row_padding;
     let expected_file_size = 54 + expected_row_size * 360;
     assert_eq!(bytes.len(), expected_file_size);
@@ -105,20 +106,19 @@ fn test_wallpaper_procedural_generation() {
 #[test]
 fn test_config_roundtrip() {
     let config = OxideConfig::default();
-    let serialized = serde_json::to_string_pretty(&config).expect("Serialization failed");
+    let serialized = toml::to_string_pretty(&config).expect("Serialization failed");
     let deserialized: OxideConfig =
-        serde_json::from_str(&serialized).expect("Deserialization failed");
+        toml::from_str(&serialized).expect("Deserialization failed");
 
-    assert_eq!(config.dock_base_size, deserialized.dock_base_size);
-    assert_eq!(config.pinned_apps.len(), deserialized.pinned_apps.len());
-    assert_eq!(config.reminders.len(), deserialized.reminders.len());
+    assert_eq!(config.dock.base_size, deserialized.dock.base_size);
+    assert_eq!(config.shell.notch_enabled, deserialized.shell.notch_enabled);
 }
 
 #[test]
 fn test_dock_magnification_physics() {
-    let config = OxideConfig::default();
+    let script_engine = oxide_shell::scripting::ScriptEngine::new();
     let icon_cache = IconCache::new();
-    let mut dock = MagnifyingDock::new(&config.pinned_apps, &icon_cache);
+    let mut dock = MagnifyingDock::new(&script_engine, &icon_cache);
 
     // Initial state: not hovered
     dock.set_mouse_position(None);
@@ -128,8 +128,8 @@ fn test_dock_magnification_physics() {
     }
 
     // Hover over the center of the first item
-    let first_item_center = 12.0 + (dock.base_size * 1.0) / 2.0;
-    dock.set_mouse_position(Some(first_item_center));
+    let first_item_center = 16.0 + (dock.base_size * 1.0) / 2.0;
+    dock.set_mouse_position(Some((first_item_center, 38.0)));
     dock.update(1.0 / 60.0);
 
     // The hovered item target scale should equal max_scale

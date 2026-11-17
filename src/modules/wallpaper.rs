@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::Write;
 use std::os::windows::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     SystemParametersInfoW, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE, SPI_SETDESKWALLPAPER,
 };
@@ -17,8 +17,8 @@ pub struct WallpaperGenerator {
 impl Default for WallpaperGenerator {
     fn default() -> Self {
         Self {
-            width: 3840,
-            height: 2160,
+            width: 1920,
+            height: 1080,
         }
     }
 }
@@ -28,40 +28,59 @@ impl WallpaperGenerator {
         Self { width, height }
     }
 
-    /// Generates a smooth macOS Sonoma/Sequoia inspired dual-tone dusk gradient with Gaussian noise dither.
+    /// Generates a rich multi-stop radial matte gradient:
+    /// Center-top (#1b2432 -> RGB 27, 36, 50)
+    /// Mid (#11151d -> RGB 17, 21, 29)
+    /// Corners (#090b10 -> RGB 9, 11, 16)
+    /// With 2.0% monochromatic Gaussian noise grain.
     pub fn generate_rgb_buffer(&self) -> Vec<u8> {
-        let total_pixels = (self.width * self.height) as usize;
-        let mut buffer = vec![0u8; total_pixels * 3];
+        let total = (self.width * self.height) as usize;
+        let mut buffer = vec![0u8; total * 3];
 
-        // Gradient color stops (Deep Midnight Obsidian -> Aurora Iris)
-        let top_r = 15.0f32;
-        let top_g = 18.0f32;
-        let top_b = 32.0f32;
+        let center_x = self.width as f32 * 0.5;
+        let center_y = self.height as f32 * 0.25; // center-top focal point
+        let max_dist = ((self.width as f32).powi(2) + (self.height as f32).powi(2)).sqrt() * 0.65;
 
-        let bot_r = 38.0f32;
-        let bot_g = 26.0f32;
-        let bot_b = 64.0f32;
+        // Color stops
+        // 0.0: Center-top #1b2432 (27, 36, 50)
+        let c0 = (27.0f32, 36.0f32, 50.0f32);
+        // 0.5: Mid #11151d (17, 21, 29)
+        let c1 = (17.0f32, 21.0f32, 29.0f32);
+        // 1.0: Corners #090b10 (9, 11, 16)
+        let c2 = (9.0f32, 11.0f32, 16.0f32);
 
-        let inv_h = 1.0 / (self.height as f32);
-        let inv_w = 1.0 / (self.width as f32);
-
-        // Simple high-speed linear congruential pseudo-noise for dither
-        let mut seed: u32 = 0x1337BEEF;
+        let mut seed: u32 = 0x5EED_CAFE;
 
         for y in 0..self.height {
-            let ty = y as f32 * inv_h;
-
+            let dy = y as f32 - center_y;
             for x in 0..self.width {
-                let tx = x as f32 * inv_w;
-                let t = (ty * 0.75 + tx * 0.25).clamp(0.0, 1.0);
+                let dx = x as f32 - center_x;
+                let dist = (dx * dx + dy * dy).sqrt();
+                let t = (dist / max_dist).clamp(0.0, 1.0);
 
-                // LCG PRNG for subtle ±2 LSB noise
+                let (base_r, base_g, base_b) = if t < 0.5 {
+                    let sub_t = t * 2.0;
+                    (
+                        c0.0 + (c1.0 - c0.0) * sub_t,
+                        c0.1 + (c1.1 - c0.1) * sub_t,
+                        c0.2 + (c1.2 - c0.2) * sub_t,
+                    )
+                } else {
+                    let sub_t = (t - 0.5) * 2.0;
+                    (
+                        c1.0 + (c2.0 - c1.0) * sub_t,
+                        c1.1 + (c2.1 - c1.1) * sub_t,
+                        c1.2 + (c2.2 - c1.2) * sub_t,
+                    )
+                };
+
+                // Monochromatic pseudo-random grain (~2.0% noise: range [-5.0, 5.0])
                 seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
-                let noise = ((seed >> 24) as f32 / 255.0 - 0.5) * 4.0;
+                let grain = (((seed >> 16) & 0xFF) as f32 / 255.0 - 0.5) * 6.0;
 
-                let r = (top_r + (bot_r - top_r) * t + noise).clamp(0.0, 255.0) as u8;
-                let g = (top_g + (bot_g - top_g) * t + noise).clamp(0.0, 255.0) as u8;
-                let b = (top_b + (bot_b - top_b) * t + noise).clamp(0.0, 255.0) as u8;
+                let r = (base_r + grain).clamp(0.0, 255.0) as u8;
+                let g = (base_g + grain).clamp(0.0, 255.0) as u8;
+                let b = (base_b + grain).clamp(0.0, 255.0) as u8;
 
                 let idx = ((y * self.width + x) as usize) * 3;
                 buffer[idx] = r;
@@ -73,7 +92,7 @@ impl WallpaperGenerator {
         buffer
     }
 
-    /// Encodes the 24-bit RGB buffer into a standard uncompressed Windows BMP file.
+    /// Encodes to a standard 24-bit Windows BMP with top-down scanlines (negative height).
     pub fn generate_bmp_bytes(&self) -> Vec<u8> {
         let rgb_data = self.generate_rgb_buffer();
         let row_padding = (4 - ((self.width * 3) % 4)) % 4;
@@ -83,34 +102,37 @@ impl WallpaperGenerator {
 
         let mut bmp = Vec::with_capacity(file_size);
 
-        // --- BMP Header (14 bytes) ---
+        // BITMAPFILEHEADER (14 bytes)
         bmp.extend_from_slice(b"BM");
         bmp.extend_from_slice(&(file_size as u32).to_le_bytes());
         bmp.extend_from_slice(&[0, 0, 0, 0]); // Reserved
-        bmp.extend_from_slice(&54u32.to_le_bytes()); // Pixel data offset
+        bmp.extend_from_slice(&54u32.to_le_bytes()); // Offset to pixel data
 
-        // --- DIB Header / BITMAPINFOHEADER (40 bytes) ---
-        bmp.extend_from_slice(&40u32.to_le_bytes()); // Header size
+        // BITMAPINFOHEADER (40 bytes)
+        bmp.extend_from_slice(&40u32.to_le_bytes());
         bmp.extend_from_slice(&(self.width as i32).to_le_bytes());
-        bmp.extend_from_slice(&(self.height as i32).to_le_bytes()); // Bottom-up
+        // Negative height indicates top-down DIB
+        bmp.extend_from_slice(&(-(self.height as i32)).to_le_bytes());
         bmp.extend_from_slice(&1u16.to_le_bytes()); // Planes
-        bmp.extend_from_slice(&24u16.to_le_bytes()); // Bits per pixel
+        bmp.extend_from_slice(&24u16.to_le_bytes()); // BPP (24-bit)
         bmp.extend_from_slice(&0u32.to_le_bytes()); // Compression (BI_RGB)
         bmp.extend_from_slice(&(image_size as u32).to_le_bytes());
         bmp.extend_from_slice(&2835u32.to_le_bytes()); // 72 DPI X
         bmp.extend_from_slice(&2835u32.to_le_bytes()); // 72 DPI Y
-        bmp.extend_from_slice(&0u32.to_le_bytes()); // Colors used
-        bmp.extend_from_slice(&0u32.to_le_bytes()); // Important colors
+        bmp.extend_from_slice(&0u32.to_le_bytes());
+        bmp.extend_from_slice(&0u32.to_le_bytes());
 
-        // BMP rows are bottom-up and BGR ordered
         let pad = vec![0u8; row_padding as usize];
-        for y in (0..self.height).rev() {
+
+        // Top-down scanlines in BGR byte order
+        for y in 0..self.height {
             let row_start = (y * self.width) as usize * 3;
             for x in 0..self.width {
                 let px = row_start + (x as usize * 3);
                 let r = rgb_data[px];
                 let g = rgb_data[px + 1];
                 let b = rgb_data[px + 2];
+                // BMP is BGR
                 bmp.push(b);
                 bmp.push(g);
                 bmp.push(r);
@@ -124,7 +146,7 @@ impl WallpaperGenerator {
     pub fn generate_and_apply(&self) -> Result<PathBuf> {
         let dir = OxideConfig::config_dir();
         std::fs::create_dir_all(&dir)?;
-        let path = dir.join("wallpaper.bmp");
+        let path = dir.join("wallpaper_matte.bmp");
 
         let bytes = self.generate_bmp_bytes();
         let mut file = File::create(&path)?;
@@ -135,7 +157,39 @@ impl WallpaperGenerator {
     }
 }
 
-pub fn apply_system_wallpaper(path: &std::path::Path) {
+pub fn calculate_average_luminance(bmp_bytes: &[u8]) -> f32 {
+    if bmp_bytes.len() < 54 {
+        return 0.0;
+    }
+
+    let pixel_data = &bmp_bytes[54..];
+    let mut total_lum = 0.0f64;
+    let mut count = 0usize;
+
+    // Sample pixels in BGR order (every 3 bytes)
+    let mut i = 0;
+    while i + 2 < pixel_data.len() {
+        let b = pixel_data[i] as f64;
+        let g = pixel_data[i + 1] as f64;
+        let r = pixel_data[i + 2] as f64;
+
+        // Rec. 601 perceived luminance
+        let lum = 0.299 * r + 0.587 * g + 0.114 * b;
+        total_lum += lum;
+        count += 1;
+
+        // Step by 12 bytes (every 4th pixel) for high-speed sampling
+        i += 12;
+    }
+
+    if count == 0 {
+        0.0
+    } else {
+        (total_lum / count as f64) as f32
+    }
+}
+
+pub fn apply_system_wallpaper(path: &Path) {
     let wide: Vec<u16> = path
         .as_os_str()
         .encode_wide()
@@ -151,4 +205,3 @@ pub fn apply_system_wallpaper(path: &std::path::Path) {
         );
     }
 }
-

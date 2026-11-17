@@ -1,92 +1,64 @@
 use serde::{Deserialize, Serialize};
 use std::fs::{create_dir_all, File};
-use std::io::{BufReader, BufWriter};
+use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use crate::error::Result;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PinnedApp {
-    pub name: String,
-    pub target_path: String,
-    pub icon_path: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReminderItem {
-    pub id: u64,
-    pub text: String,
-    pub completed: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OxideConfig {
-    pub dock_base_size: f32,
-    pub dock_max_scale: f32,
-    pub dock_influence_radius: f32,
+pub struct ShellConfig {
+    pub dark_mode: bool,
     pub notch_enabled: bool,
     pub widgets_enabled: bool,
-    pub dark_mode: bool,
-    pub spring_stiffness: f32,
-    pub spring_damping: f32,
-    pub weather_city: String,
-    pub pinned_apps: Vec<PinnedApp>,
-    pub reminders: Vec<ReminderItem>,
+    pub dock_enabled: bool,
 }
 
-impl Default for OxideConfig {
+impl Default for ShellConfig {
     fn default() -> Self {
         Self {
-            dock_base_size: 56.0,
-            dock_max_scale: 1.55,
-            dock_influence_radius: 140.0,
+            dark_mode: true,
             notch_enabled: true,
             widgets_enabled: true,
-            dark_mode: true,
-            spring_stiffness: 280.0,
-            spring_damping: 28.0,
-            weather_city: "Cupertino".to_string(),
-            pinned_apps: vec![
-                PinnedApp {
-                    name: "Explorer".to_string(),
-                    target_path: "explorer.exe".to_string(),
-                    icon_path: None,
-                },
-                PinnedApp {
-                    name: "Terminal".to_string(),
-                    target_path: "wt.exe".to_string(),
-                    icon_path: None,
-                },
-                PinnedApp {
-                    name: "Edge".to_string(),
-                    target_path: "msedge.exe".to_string(),
-                    icon_path: None,
-                },
-                PinnedApp {
-                    name: "Settings".to_string(),
-                    target_path: "ms-settings:".to_string(),
-                    icon_path: None,
-                },
-            ],
-            reminders: vec![
-                ReminderItem {
-                    id: 1,
-                    text: "Review Rust memory telemetry (< 12MB)".to_string(),
-                    completed: true,
-                },
-                ReminderItem {
-                    id: 2,
-                    text: "Fine-tune squircle continuous curvature".to_string(),
-                    completed: false,
-                },
-                ReminderItem {
-                    id: 3,
-                    text: "Verify DWM hardware glass composite".to_string(),
-                    completed: false,
-                },
-            ],
+            dock_enabled: true,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DockConfig {
+    pub base_size: f32,
+    pub max_scale: f32,
+    pub influence_radius: f32,
+}
+
+impl Default for DockConfig {
+    fn default() -> Self {
+        Self {
+            base_size: 54.0,
+            max_scale: 1.55,
+            influence_radius: 140.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PositionsConfig {
+    pub dock_x: Option<i32>,
+    pub dock_y: Option<i32>,
+    pub widgets_x: Option<i32>,
+    pub widgets_y: Option<i32>,
+    pub notch_x: Option<i32>,
+    pub notch_y: Option<i32>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OxideConfig {
+    pub shell: ShellConfig,
+    pub dock: DockConfig,
+    pub positions: PositionsConfig,
+    #[serde(skip)]
+    pub last_modified: Option<SystemTime>,
 }
 
 impl OxideConfig {
@@ -98,17 +70,26 @@ impl OxideConfig {
         }
     }
 
+    pub fn scripts_dir() -> PathBuf {
+        Self::config_dir().join("scripts")
+    }
+
     pub fn config_file_path() -> PathBuf {
-        Self::config_dir().join("config.json")
+        Self::config_dir().join("config.toml")
     }
 
     pub fn load() -> Self {
         let path = Self::config_file_path();
         if path.exists() {
-            if let Ok(file) = File::open(&path) {
-                let reader = BufReader::new(file);
-                if let Ok(config) = serde_json::from_reader(reader) {
-                    return config;
+            if let Ok(mut file) = File::open(&path) {
+                let mut contents = String::new();
+                if file.read_to_string(&mut contents).is_ok() {
+                    if let Ok(mut config) = toml::from_str::<OxideConfig>(&contents) {
+                        config.last_modified = std::fs::metadata(&path)
+                            .and_then(|m| m.modified())
+                            .ok();
+                        return config;
+                    }
                 }
             }
         }
@@ -123,10 +104,23 @@ impl OxideConfig {
             create_dir_all(&dir)?;
         }
         let path = Self::config_file_path();
-        let file = File::create(path)?;
-        let writer = BufWriter::new(file);
-        serde_json::to_writer_pretty(writer, self)?;
+        let toml_str = toml::to_string_pretty(self).unwrap_or_default();
+        let mut file = File::create(path)?;
+        file.write_all(toml_str.as_bytes())?;
         Ok(())
     }
-}
 
+    /// Checks if config.toml was modified on disk; if so, reloads and returns true.
+    pub fn check_reload(&mut self) -> bool {
+        let path = Self::config_file_path();
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if let Ok(mtime) = meta.modified() {
+                if self.last_modified.is_none_or(|last| mtime > last) {
+                    *self = Self::load();
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}

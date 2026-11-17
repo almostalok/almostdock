@@ -25,7 +25,7 @@ impl Default for AppLauncher {
             all_apps: Vec::new(),
             filtered_indices: Vec::new(),
             selected_index: 0,
-            width: 680,
+            width: 720,
             height: 480,
             surface: None,
         }

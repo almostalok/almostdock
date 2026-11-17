@@ -26,6 +26,9 @@ pub enum OxideError {
 
     #[error("Shell error: {0}")]
     Shell(String),
+
+    #[error("Wallpaper error: {0}")]
+    Wallpaper(String),
 }
 
 pub type Result<T> = std::result::Result<T, OxideError>;

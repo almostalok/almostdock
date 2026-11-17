@@ -1,13 +1,41 @@
 use std::fs::File;
-use std::io::Write;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use windows_sys::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    SystemParametersInfoW, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE, SPI_SETDESKWALLPAPER,
+    GetSystemMetrics, SystemParametersInfoW, SM_CXSCREEN, SM_CYSCREEN, SPIF_SENDCHANGE,
+    SPIF_UPDATEINIFILE, SPI_SETDESKWALLPAPER,
 };
 
 use crate::config::OxideConfig;
 use crate::error::Result;
+
+// CLSID_DesktopWallpaper: C2CF3110-460E-4fc1-B9D0-8A1C0C9CC4BD
+const CLSID_DESKTOP_WALLPAPER: windows_sys::core::GUID = windows_sys::core::GUID {
+    data1: 0xC2CF3110,
+    data2: 0x460E,
+    data3: 0x4FC1,
+    data4: [0xB9, 0xD0, 0x8A, 0x1C, 0x0C, 0x9C, 0xC4, 0xBD],
+};
+
+// IID_IDesktopWallpaper: B92B56A9-8B55-4E14-9A89-0199BBB6F93B
+const IID_IDESKTOP_WALLPAPER: windows_sys::core::GUID = windows_sys::core::GUID {
+    data1: 0xB92B56A9,
+    data2: 0x8B55,
+    data3: 0x4E14,
+    data4: [0x9A, 0x89, 0x01, 0x99, 0xBB, 0xB6, 0xF9, 0x3B],
+};
+
+#[repr(C)]
+#[allow(non_snake_case)]
+struct IDesktopWallpaperVtbl {
+    pub QueryInterface: unsafe extern "system" fn(this: *mut std::ffi::c_void, riid: *const windows_sys::core::GUID, ppv: *mut *mut std::ffi::c_void) -> i32,
+    pub AddRef: unsafe extern "system" fn(this: *mut std::ffi::c_void) -> u32,
+    pub Release: unsafe extern "system" fn(this: *mut std::ffi::c_void) -> u32,
+    pub SetWallpaper: unsafe extern "system" fn(this: *mut std::ffi::c_void, monitor_id: *const u16, wallpaper: *const u16) -> i32,
+    pub GetWallpaper: unsafe extern "system" fn(this: *mut std::ffi::c_void, monitor_id: *const u16, wallpaper: *mut *mut u16) -> i32,
+    // (other methods not needed for setting wallpaper)
+}
 
 pub struct WallpaperGenerator {
     pub width: u32,
@@ -16,9 +44,11 @@ pub struct WallpaperGenerator {
 
 impl Default for WallpaperGenerator {
     fn default() -> Self {
+        let sw = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+        let sh = unsafe { GetSystemMetrics(SM_CYSCREEN) };
         Self {
-            width: 1920,
-            height: 1080,
+            width: if sw > 0 { sw as u32 } else { 1920 },
+            height: if sh > 0 { sh as u32 } else { 1080 },
         }
     }
 }
@@ -28,26 +58,23 @@ impl WallpaperGenerator {
         Self { width, height }
     }
 
-    /// Generates a rich multi-stop radial matte gradient:
-    /// Center-top (#1b2432 -> RGB 27, 36, 50)
-    /// Mid (#11151d -> RGB 17, 21, 29)
-    /// Corners (#090b10 -> RGB 9, 11, 16)
-    /// With 2.0% monochromatic Gaussian noise grain.
+    /// Generates a rich macOS Sequoia-style dark radial/mesh gradient:
+    /// #1e293b upper-right glow (RGB 30, 41, 59)
+    /// #111622 mid (RGB 17, 22, 34)
+    /// #090c12 deep matte corners (RGB 9, 12, 18)
+    /// With 2.2% monochromatic Gaussian grain.
     pub fn generate_rgb_buffer(&self) -> Vec<u8> {
         let total = (self.width * self.height) as usize;
         let mut buffer = vec![0u8; total * 3];
 
-        let center_x = self.width as f32 * 0.5;
-        let center_y = self.height as f32 * 0.25; // center-top focal point
-        let max_dist = ((self.width as f32).powi(2) + (self.height as f32).powi(2)).sqrt() * 0.65;
+        let center_x = self.width as f32 * 0.72; // upper-right focal point
+        let center_y = self.height as f32 * 0.22;
+        let max_dist = ((self.width as f32).powi(2) + (self.height as f32).powi(2)).sqrt() * 0.75;
 
         // Color stops
-        // 0.0: Center-top #1b2432 (27, 36, 50)
-        let c0 = (27.0f32, 36.0f32, 50.0f32);
-        // 0.5: Mid #11151d (17, 21, 29)
-        let c1 = (17.0f32, 21.0f32, 29.0f32);
-        // 1.0: Corners #090b10 (9, 11, 16)
-        let c2 = (9.0f32, 11.0f32, 16.0f32);
+        let c0 = (30.0f32, 41.0f32, 59.0f32); // #1e293b upper-right glow
+        let c1 = (17.0f32, 22.0f32, 34.0f32); // #111622 mid
+        let c2 = (9.0f32, 12.0f32, 18.0f32);   // #090c12 deep matte corners
 
         let mut seed: u32 = 0x5EED_CAFE;
 
@@ -74,9 +101,9 @@ impl WallpaperGenerator {
                     )
                 };
 
-                // Monochromatic pseudo-random grain (~2.0% noise: range [-5.0, 5.0])
+                // Monochromatic pseudo-random grain (~2.2% noise: range [-5.6, 5.6])
                 seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
-                let grain = (((seed >> 16) & 0xFF) as f32 / 255.0 - 0.5) * 6.0;
+                let grain = (((seed >> 16) & 0xFF) as f32 / 255.0 - 0.5) * 6.5;
 
                 let r = (base_r + grain).clamp(0.0, 255.0) as u8;
                 let g = (base_g + grain).clamp(0.0, 255.0) as u8;
@@ -92,103 +119,43 @@ impl WallpaperGenerator {
         buffer
     }
 
-    /// Encodes to a standard 24-bit Windows BMP with top-down scanlines (negative height).
-    pub fn generate_bmp_bytes(&self) -> Vec<u8> {
-        let rgb_data = self.generate_rgb_buffer();
-        let row_padding = (4 - ((self.width * 3) % 4)) % 4;
-        let row_size = (self.width * 3 + row_padding) as usize;
-        let image_size = row_size * self.height as usize;
-        let file_size = 54 + image_size;
-
-        let mut bmp = Vec::with_capacity(file_size);
-
-        // BITMAPFILEHEADER (14 bytes)
-        bmp.extend_from_slice(b"BM");
-        bmp.extend_from_slice(&(file_size as u32).to_le_bytes());
-        bmp.extend_from_slice(&[0, 0, 0, 0]); // Reserved
-        bmp.extend_from_slice(&54u32.to_le_bytes()); // Offset to pixel data
-
-        // BITMAPINFOHEADER (40 bytes)
-        bmp.extend_from_slice(&40u32.to_le_bytes());
-        bmp.extend_from_slice(&(self.width as i32).to_le_bytes());
-        // Negative height indicates top-down DIB
-        bmp.extend_from_slice(&(-(self.height as i32)).to_le_bytes());
-        bmp.extend_from_slice(&1u16.to_le_bytes()); // Planes
-        bmp.extend_from_slice(&24u16.to_le_bytes()); // BPP (24-bit)
-        bmp.extend_from_slice(&0u32.to_le_bytes()); // Compression (BI_RGB)
-        bmp.extend_from_slice(&(image_size as u32).to_le_bytes());
-        bmp.extend_from_slice(&2835u32.to_le_bytes()); // 72 DPI X
-        bmp.extend_from_slice(&2835u32.to_le_bytes()); // 72 DPI Y
-        bmp.extend_from_slice(&0u32.to_le_bytes());
-        bmp.extend_from_slice(&0u32.to_le_bytes());
-
-        let pad = vec![0u8; row_padding as usize];
-
-        // Top-down scanlines in BGR byte order
-        for y in 0..self.height {
-            let row_start = (y * self.width) as usize * 3;
-            for x in 0..self.width {
-                let px = row_start + (x as usize * 3);
-                let r = rgb_data[px];
-                let g = rgb_data[px + 1];
-                let b = rgb_data[px + 2];
-                // BMP is BGR
-                bmp.push(b);
-                bmp.push(g);
-                bmp.push(r);
-            }
-            bmp.extend_from_slice(&pad);
+    /// Encodes the gradient directly to a valid PNG file and drops pixel memory immediately.
+    pub fn generate_and_save_png(&self, path: &Path) -> Result<PathBuf> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
         }
 
-        bmp
+        let rgb_buffer = self.generate_rgb_buffer();
+
+        let file = File::create(path)?;
+        let mut w = std::io::BufWriter::new(file);
+
+        let mut encoder = png::Encoder::new(&mut w, self.width, self.height);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fast);
+
+        let mut writer = encoder.write_header().map_err(|e| crate::error::OxideError::Wallpaper(e.to_string()))?;
+        writer.write_image_data(&rgb_buffer).map_err(|e| crate::error::OxideError::Wallpaper(e.to_string()))?;
+
+        drop(rgb_buffer); // Immediate purge from memory
+
+        Ok(path.to_path_buf())
     }
 
+    /// Generates wallpaper.png in %APPDATA%\OxideShell and applies it via COM + SPI fallback
     pub fn generate_and_apply(&self) -> Result<PathBuf> {
         let dir = OxideConfig::config_dir();
         std::fs::create_dir_all(&dir)?;
-        let path = dir.join("wallpaper_matte.bmp");
+        let path = dir.join("wallpaper.png");
 
-        let bytes = self.generate_bmp_bytes();
-        let mut file = File::create(&path)?;
-        file.write_all(&bytes)?;
-
+        self.generate_and_save_png(&path)?;
         apply_system_wallpaper(&path);
         Ok(path)
     }
 }
 
-pub fn calculate_average_luminance(bmp_bytes: &[u8]) -> f32 {
-    if bmp_bytes.len() < 54 {
-        return 0.0;
-    }
-
-    let pixel_data = &bmp_bytes[54..];
-    let mut total_lum = 0.0f64;
-    let mut count = 0usize;
-
-    // Sample pixels in BGR order (every 3 bytes)
-    let mut i = 0;
-    while i + 2 < pixel_data.len() {
-        let b = pixel_data[i] as f64;
-        let g = pixel_data[i + 1] as f64;
-        let r = pixel_data[i + 2] as f64;
-
-        // Rec. 601 perceived luminance
-        let lum = 0.299 * r + 0.587 * g + 0.114 * b;
-        total_lum += lum;
-        count += 1;
-
-        // Step by 12 bytes (every 4th pixel) for high-speed sampling
-        i += 12;
-    }
-
-    if count == 0 {
-        0.0
-    } else {
-        (total_lum / count as f64) as f32
-    }
-}
-
+/// Applies wallpaper via COM IDesktopWallpaper, with SystemParametersInfoW fallback
 pub fn apply_system_wallpaper(path: &Path) {
     let wide: Vec<u16> = path
         .as_os_str()
@@ -196,12 +163,70 @@ pub fn apply_system_wallpaper(path: &Path) {
         .chain(std::iter::once(0))
         .collect();
 
+    // 1. Try Windows COM IDesktopWallpaper interface
+    let mut com_applied = false;
     unsafe {
-        SystemParametersInfoW(
-            SPI_SETDESKWALLPAPER,
-            0,
-            wide.as_ptr() as *mut _,
-            SPIF_UPDATEINIFILE | SPIF_SENDCHANGE,
+        CoInitializeEx(std::ptr::null_mut(), 0);
+
+        let mut wallpaper_obj: *mut std::ffi::c_void = std::ptr::null_mut();
+        let hr = CoCreateInstance(
+            &CLSID_DESKTOP_WALLPAPER,
+            std::ptr::null_mut(),
+            CLSCTX_ALL,
+            &IID_IDESKTOP_WALLPAPER,
+            &mut wallpaper_obj,
         );
+
+        if hr >= 0 && !wallpaper_obj.is_null() {
+            let vtbl = *(wallpaper_obj as *mut *mut IDesktopWallpaperVtbl);
+            let set_hr = ((*vtbl).SetWallpaper)(wallpaper_obj, std::ptr::null(), wide.as_ptr());
+            if set_hr >= 0 {
+                com_applied = true;
+            }
+            ((*vtbl).Release)(wallpaper_obj);
+        }
+
+        CoUninitialize();
+    }
+
+    // 2. Fallback to SystemParametersInfoW (works across all Windows versions)
+    if !com_applied {
+        unsafe {
+            SystemParametersInfoW(
+                SPI_SETDESKWALLPAPER,
+                0,
+                wide.as_ptr() as *mut _,
+                SPIF_UPDATEINIFILE | SPIF_SENDCHANGE,
+            );
+        }
+    }
+}
+
+/// Calculates average perceived luminance from raw RGB buffer for validation tests
+pub fn calculate_rgb_average_luminance(rgb_data: &[u8]) -> f32 {
+    if rgb_data.len() < 3 {
+        return 0.0;
+    }
+
+    let mut total_lum = 0.0f64;
+    let mut count = 0usize;
+
+    let mut i = 0;
+    while i + 2 < rgb_data.len() {
+        let r = rgb_data[i] as f64;
+        let g = rgb_data[i + 1] as f64;
+        let b = rgb_data[i + 2] as f64;
+
+        let lum = 0.299 * r + 0.587 * g + 0.114 * b;
+        total_lum += lum;
+        count += 1;
+
+        i += 12; // Sample every 4th pixel for speed
+    }
+
+    if count == 0 {
+        0.0
+    } else {
+        (total_lum / count as f64) as f32
     }
 }

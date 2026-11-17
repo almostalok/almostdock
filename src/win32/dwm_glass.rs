@@ -50,7 +50,7 @@ pub fn apply_acrylic_glass_and_strip_chrome(hwnd: HWND, topmost: bool) {
         // 1. Strip all borders, title bar, maximize/minimize/close buttons
         SetWindowLongPtrW(hwnd, GWL_STYLE, (WS_POPUP | WS_VISIBLE) as isize);
 
-        let mut ex_style = WS_POPUP | WS_EX_LAYERED | WS_EX_TOOLWINDOW;
+        let mut ex_style = WS_EX_LAYERED | WS_EX_TOOLWINDOW;
         if topmost {
             ex_style |= WS_EX_TOPMOST;
         }
@@ -153,6 +153,9 @@ pub enum ContextMenuChoice {
     OpenConfigFolder = 1005,
     ReloadScripts = 1006,
     Quit = 1007,
+    EditScripts = 1008,
+    RegenerateWallpaper = 1009,
+    ShowAllModules = 1010,
 }
 
 fn to_wide(s: &str) -> Vec<u16> {
@@ -169,21 +172,28 @@ pub fn show_native_context_menu(hwnd: HWND, screen_x: i32, screen_y: i32) -> Opt
             return None;
         }
 
+        let show_all_label = to_wide("Show All Modules");
         let notch_label = to_wide("Toggle Top Notch");
         let widgets_label = to_wide("Toggle Desktop Widgets");
         let dock_label = to_wide("Toggle Glass Dock");
+        let wallpaper_label = to_wide("Regenerate Studio Wallpaper");
+        let edit_scripts_label = to_wide("Edit Scripts (%APPDATA%\\OxideShell\\scripts)");
         let reset_label = to_wide("Reset All Positions");
-        let open_label = to_wide("Open Config & Scripts Folder");
-        let reload_label = to_wide("Reload Scripts");
+        let open_label = to_wide("Open Config Folder");
+        let reload_label = to_wide("Reload Settings & Scripts");
         let quit_label = to_wide("Quit OxideShell");
 
+        AppendMenuW(menu, MF_STRING, ContextMenuChoice::ShowAllModules as usize, show_all_label.as_ptr());
+        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(menu, MF_STRING, ContextMenuChoice::ToggleNotch as usize, notch_label.as_ptr());
         AppendMenuW(menu, MF_STRING, ContextMenuChoice::ToggleWidgets as usize, widgets_label.as_ptr());
         AppendMenuW(menu, MF_STRING, ContextMenuChoice::ToggleDock as usize, dock_label.as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+        AppendMenuW(menu, MF_STRING, ContextMenuChoice::RegenerateWallpaper as usize, wallpaper_label.as_ptr());
+        AppendMenuW(menu, MF_STRING, ContextMenuChoice::EditScripts as usize, edit_scripts_label.as_ptr());
+        AppendMenuW(menu, MF_STRING, ContextMenuChoice::ReloadScripts as usize, reload_label.as_ptr());
         AppendMenuW(menu, MF_STRING, ContextMenuChoice::ResetPositions as usize, reset_label.as_ptr());
         AppendMenuW(menu, MF_STRING, ContextMenuChoice::OpenConfigFolder as usize, open_label.as_ptr());
-        AppendMenuW(menu, MF_STRING, ContextMenuChoice::ReloadScripts as usize, reload_label.as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(menu, MF_STRING, ContextMenuChoice::Quit as usize, quit_label.as_ptr());
 
@@ -207,6 +217,9 @@ pub fn show_native_context_menu(hwnd: HWND, screen_x: i32, screen_y: i32) -> Opt
             1005 => Some(ContextMenuChoice::OpenConfigFolder),
             1006 => Some(ContextMenuChoice::ReloadScripts),
             1007 => Some(ContextMenuChoice::Quit),
+            1008 => Some(ContextMenuChoice::EditScripts),
+            1009 => Some(ContextMenuChoice::RegenerateWallpaper),
+            1010 => Some(ContextMenuChoice::ShowAllModules),
             _ => None,
         }
     }

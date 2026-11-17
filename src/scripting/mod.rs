@@ -64,7 +64,7 @@ impl ScriptEngine {
         });
 
         engine.register_fn("set_wallpaper", |_preset: &str| {
-            let gen = WallpaperGenerator::new(1920, 1080);
+            let gen = WallpaperGenerator::default();
             let _ = gen.generate_and_apply();
         });
 
@@ -111,16 +111,18 @@ impl ScriptEngine {
             let _ = create_dir_all(&scripts_dir);
         }
 
-        let dock_path = scripts_dir.join("dock_actions.rhai");
+        // 1. dock.rhai
+        let dock_path = scripts_dir.join("dock.rhai");
         if !dock_path.exists() {
             let dock_rhai = r#"
 fn get_dock_items() {
     [
-        #{ id: "explorer", name: "Explorer", icon: "📁", badge: "" },
-        #{ id: "terminal", name: "Terminal", icon: "💻", badge: "zsh" },
-        #{ id: "browser",  name: "Browser",  icon: "🌐", badge: "" },
-        #{ id: "settings", name: "Settings", icon: "⚙️", badge: "" },
-        #{ id: "launcher", name: "Apps",     icon: "🚀", badge: "" },
+        #{ id: "explorer", name: "Explorer", icon: "📁", badge: "", target: "explorer.exe" },
+        #{ id: "terminal", name: "Terminal", icon: "💻", badge: "zsh", target: "wt.exe" },
+        #{ id: "browser",  name: "Browser",  icon: "🌐", badge: "", target: "msedge.exe" },
+        #{ id: "code",     name: "Code",     icon: "📝", badge: "", target: "Code.exe" },
+        #{ id: "taskmgr",  name: "Activity", icon: "📊", badge: "", target: "taskmgr.exe" },
+        #{ id: "launcher", name: "Apps",     icon: "🚀", badge: "", target: "" },
     ]
 }
 
@@ -131,8 +133,10 @@ fn on_click(app_id) {
         exec_bg("wt.exe");
     } else if app_id == "browser" {
         exec_bg("msedge.exe");
-    } else if app_id == "settings" {
-        exec_bg("cmd /c start ms-settings:");
+    } else if app_id == "code" {
+        exec_bg("code .");
+    } else if app_id == "taskmgr" {
+        exec_bg("taskmgr.exe");
     } else if app_id == "launcher" {
         toggle_module("launcher");
     }
@@ -141,6 +145,15 @@ fn on_click(app_id) {
             let _ = std::fs::write(&dock_path, dock_rhai.trim());
         }
 
+        // Also create backward-compatible dock_actions.rhai if not exists
+        let dock_actions_path = scripts_dir.join("dock_actions.rhai");
+        if !dock_actions_path.exists() {
+            if let Ok(c) = std::fs::read_to_string(&dock_path) {
+                let _ = std::fs::write(&dock_actions_path, c);
+            }
+        }
+
+        // 2. widgets.rhai
         let widgets_path = scripts_dir.join("widgets.rhai");
         if !widgets_path.exists() {
             let widgets_rhai = r#"
@@ -163,7 +176,7 @@ fn on_tick() {
         },
         #{
             type: "quick_launch",
-            title: "Developer Tools",
+            title: "Productivity",
             items: [
                 #{ id: "term", label: "Terminal", cmd: "wt.exe" },
                 #{ id: "code", label: "VS Code", cmd: "code ." },
@@ -172,11 +185,11 @@ fn on_tick() {
         },
         #{
             type: "tasks",
-            title: "Today's Tasks",
+            title: "Priority Tasks",
             tasks: [
-                #{ id: "t1", text: "Review memory telemetry (< 14MB)", done: true },
-                #{ id: "t2", text: "Tune squircle continuous curvature", done: false },
-                #{ id: "t3", text: "Verify Acrylic blur compositing", done: false },
+                #{ id: "t1", text: "Complete architecture review", done: true },
+                #{ id: "t2", text: "Finalize presentation deck", done: false },
+                #{ id: "t3", text: "Sync upstream git commits", done: false },
             ],
         },
     ]
@@ -195,7 +208,8 @@ fn on_click(widget_id, item_id) {
             let _ = std::fs::write(&widgets_path, widgets_rhai.trim());
         }
 
-        let notch_path = scripts_dir.join("notch_modules.rhai");
+        // 3. notch.rhai
+        let notch_path = scripts_dir.join("notch.rhai");
         if !notch_path.exists() {
             let notch_rhai = r#"
 fn get_notch_state() {
@@ -220,6 +234,14 @@ fn on_action(action) {
 "#;
             let _ = std::fs::write(&notch_path, notch_rhai.trim());
         }
+
+        // Backward compatibility: notch_modules.rhai
+        let notch_modules_path = scripts_dir.join("notch_modules.rhai");
+        if !notch_modules_path.exists() {
+            if let Ok(c) = std::fs::read_to_string(&notch_path) {
+                let _ = std::fs::write(&notch_modules_path, c);
+            }
+        }
     }
 
     pub fn load_script(&mut self, name: &str, path: &Path) -> bool {
@@ -239,7 +261,7 @@ fn on_action(action) {
 
     pub fn load_all_scripts(&mut self) {
         let scripts_dir = OxideConfig::scripts_dir();
-        for script_name in &["dock_actions", "widgets", "notch_modules"] {
+        for script_name in &["dock", "dock_actions", "widgets", "notch", "notch_modules"] {
             let path = scripts_dir.join(format!("{}.rhai", script_name));
             if path.exists() {
                 self.load_script(script_name, &path);
@@ -251,7 +273,7 @@ fn on_action(action) {
         let mut reloaded = false;
         let scripts_dir = OxideConfig::scripts_dir();
 
-        for script_name in ["dock_actions", "widgets", "notch_modules"] {
+        for script_name in ["dock", "dock_actions", "widgets", "notch", "notch_modules"] {
             let path = scripts_dir.join(format!("{}.rhai", script_name));
             if path.exists() {
                 if let Ok(meta) = std::fs::metadata(&path) {
@@ -273,7 +295,8 @@ fn on_action(action) {
     }
 
     pub fn call_dock_items(&self) -> Array {
-        if let Some(ast) = self.asts.get("dock_actions") {
+        let ast = self.asts.get("dock").or_else(|| self.asts.get("dock_actions"));
+        if let Some(ast) = ast {
             let mut scope = Scope::new();
             if let Ok(items) = self.engine.call_fn::<Array>(&mut scope, ast, "get_dock_items", ()) {
                 return items;
@@ -283,7 +306,8 @@ fn on_action(action) {
     }
 
     pub fn call_dock_click(&self, app_id: &str) {
-        if let Some(ast) = self.asts.get("dock_actions") {
+        let ast = self.asts.get("dock").or_else(|| self.asts.get("dock_actions"));
+        if let Some(ast) = ast {
             let mut scope = Scope::new();
             let _ = self.engine.call_fn::<Dynamic>(&mut scope, ast, "on_click", (app_id.to_string(),));
         }
@@ -312,7 +336,8 @@ fn on_action(action) {
     }
 
     pub fn call_notch_state(&self) -> Map {
-        if let Some(ast) = self.asts.get("notch_modules") {
+        let ast = self.asts.get("notch").or_else(|| self.asts.get("notch_modules"));
+        if let Some(ast) = ast {
             let mut scope = Scope::new();
             if let Ok(state) = self.engine.call_fn::<Map>(&mut scope, ast, "get_notch_state", ()) {
                 return state;
@@ -322,7 +347,8 @@ fn on_action(action) {
     }
 
     pub fn call_notch_action(&self, action: &str) {
-        if let Some(ast) = self.asts.get("notch_modules") {
+        let ast = self.asts.get("notch").or_else(|| self.asts.get("notch_modules"));
+        if let Some(ast) = ast {
             let mut scope = Scope::new();
             let _ = self.engine.call_fn::<Dynamic>(&mut scope, ast, "on_action", (action.to_string(),));
         }

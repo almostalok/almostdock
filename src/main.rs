@@ -1,11 +1,9 @@
-use std::num::NonZeroU32;
 use std::os::windows::ffi::OsStrExt;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use softbuffer::{Context, Surface};
 use tiny_skia::{Color, Pixmap};
 use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, HWND, POINT};
 use windows_sys::Win32::System::Threading::CreateMutexW;
@@ -30,19 +28,21 @@ use modules::launcher::AppLauncher;
 use modules::notch::DynamicNotch;
 use modules::wallpaper::WallpaperGenerator;
 use modules::widgets::DesktopWidgets;
-use render::canvas::copy_pixmap_to_softbuffer;
 use render::typography::FontRenderer;
 use scripting::ScriptEngine;
 use win32::dwm_glass::{
     apply_acrylic_glass_and_strip_chrome, set_window_bounds, show_native_context_menu,
-    start_window_drag, ContextMenuChoice,
+    ContextMenuChoice,
 };
+use win32::layered::LayeredSurface;
 use win32::layout::{LayoutSolver, ScreenGeometry};
 use win32::shell_icons::IconCache;
 use win32::telemetry::{get_process_memory, trim_working_set};
 
 const SINGLE_INSTANCE_MUTEX: &str = "OxideShell_SingleInstance_Mutex_Global";
 const HOTKEY_LAUNCHER_ID: i32 = 0x5348; // "SH"
+
+type DragState = (winit::window::WindowId, (i32, i32), (i32, i32));
 
 fn get_hwnd(window: &Window) -> HWND {
     if let Ok(handle) = window.window_handle() {
@@ -82,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 4. Initialize Procedural Matte Wallpaper
-    let wallpaper_gen = WallpaperGenerator::new(1920, 1080);
+    let wallpaper_gen = WallpaperGenerator::default();
     let _ = wallpaper_gen.generate_and_apply();
 
     // 5. Initialize Shared Font Renderer & Icon Cache
@@ -92,16 +92,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let icon_cache = IconCache::new();
 
-    // 6. Query Monitor Geometry & Calculate Initial Non-Overlapping Layout
+    // 6. Query Monitor Geometry & Calculate Initial Layout
     let geometry = ScreenGeometry::query_primary();
-    let initial_layout = LayoutSolver::solve(&geometry, 440);
+    let initial_layout = LayoutSolver::solve(&geometry, 680);
 
     // 7. Create Winit Event Loop
     let event_loop = EventLoop::new()?;
 
-    // 8. Create Bottom Dock Window
-    let dock_x = config.positions.dock_x.unwrap_or(initial_layout.dock_rect.left);
-    let dock_y = config.positions.dock_y.unwrap_or(initial_layout.dock_rect.top);
+    // 8. Create Bottom Dock Window (Layered Surface 680 x 116)
+    let mut dock_x = config.positions.dock_x.unwrap_or(initial_layout.dock_rect.left);
+    let mut dock_y = config.positions.dock_y.unwrap_or(initial_layout.dock_rect.top);
     let dock_w = initial_layout.dock_rect.width() as f64;
     let dock_h = initial_layout.dock_rect.height() as f64;
 
@@ -119,10 +119,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dock_hwnd = get_hwnd(&dock_window);
     apply_acrylic_glass_and_strip_chrome(dock_hwnd, true);
     set_window_bounds(dock_hwnd, dock_x, dock_y, dock_w as i32, dock_h as i32);
+    let mut dock_layered = LayeredSurface::new(dock_w as u32, dock_h as u32)
+        .map_err(std::io::Error::other)?;
 
-    // 9. Create Top Notch Window (Anchored at top-center)
-    let notch_x = config.positions.notch_x.unwrap_or(initial_layout.notch_rect.left);
-    let notch_y = config.positions.notch_y.unwrap_or(0);
+    // 9. Create Top Notch Window (Layered Surface 540 x 160 max buffer)
+    let mut notch_x = config.positions.notch_x.unwrap_or(initial_layout.notch_rect.left);
+    let mut notch_y = config.positions.notch_y.unwrap_or(0);
     let notch_w = initial_layout.notch_rect.width() as f64;
     let notch_h = initial_layout.notch_rect.height() as f64;
 
@@ -140,10 +142,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let notch_hwnd = get_hwnd(&notch_window);
     apply_acrylic_glass_and_strip_chrome(notch_hwnd, true);
     set_window_bounds(notch_hwnd, notch_x, notch_y, notch_w as i32, notch_h as i32);
+    let mut notch_layered = LayeredSurface::new(540, 160)
+        .map_err(std::io::Error::other)?;
 
-    // 10. Create Desktop Widgets Window (Docked on right edge, HWND_BOTTOM)
-    let widgets_x = config.positions.widgets_x.unwrap_or(initial_layout.widget_rect.left);
-    let widgets_y = config.positions.widgets_y.unwrap_or(initial_layout.widget_rect.top);
+    // 10. Create Desktop Widgets Window (Layered Surface 300 x 620, Desktop Layer)
+    let mut widgets_x = config.positions.widgets_x.unwrap_or(initial_layout.widget_rect.left);
+    let mut widgets_y = config.positions.widgets_y.unwrap_or(initial_layout.widget_rect.top);
     let widgets_w = initial_layout.widget_rect.width() as f64;
     let widgets_h = initial_layout.widget_rect.height() as f64;
 
@@ -159,26 +163,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let widgets_window = Arc::new(widgets_window);
     let widgets_hwnd = get_hwnd(&widgets_window);
-    // Widgets sit on the desktop layer like macOS Sonoma
     apply_acrylic_glass_and_strip_chrome(widgets_hwnd, false);
     set_window_bounds(widgets_hwnd, widgets_x, widgets_y, widgets_w as i32, widgets_h as i32);
+    let mut widgets_layered = LayeredSurface::new(widgets_w as u32, widgets_h as u32)
+        .map_err(std::io::Error::other)?;
 
-    // 11. Softbuffer Context & Surfaces
-    let context = Context::new(dock_window.clone())?;
-    let mut dock_surface = Surface::new(&context, dock_window.clone())?;
-    let mut notch_surface = Surface::new(&context, notch_window.clone())?;
-    let mut widgets_surface = Surface::new(&context, widgets_window.clone())?;
-
-    // Dynamic Launcher Window & Surface (created on demand, destroyed on close)
+    // Dynamic Launcher Window & Layered Surface (created on demand, destroyed on close)
     let mut launcher_window: Option<Arc<Window>> = None;
-    let mut launcher_surface: Option<Surface<Arc<Window>, Arc<Window>>> = None;
+    let mut launcher_layered: Option<LayeredSurface> = None;
 
-    // 12. Instantiate Modules
+    // 11. Instantiate Modules
     let mut dock = MagnifyingDock::new(&script_engine, &icon_cache);
     let mut notch = DynamicNotch::new();
     let mut widgets = DesktopWidgets::new();
     widgets.update(&script_engine);
     let mut launcher = AppLauncher::new();
+
+    // Drag-anywhere tracking state
+    let mut drag_state: Option<DragState> = None;
 
     // Initial RAM Purge
     trim_working_set();
@@ -197,16 +199,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 window_id,
                 event: window_event,
             } => {
-                // --- DOCK EVENTS ---
+                // --- DOCK WINDOW EVENTS ---
                 if window_id == dock_window.id() {
                     match window_event {
                         WindowEvent::CursorMoved { position, .. } => {
-                            dock.set_mouse_position(Some((position.x as f32, position.y as f32)));
-                            dock_window.request_redraw();
+                            if let Some((drag_id, (start_cx, start_cy), (start_wx, start_wy))) = drag_state {
+                                if drag_id == window_id {
+                                    let (cur_x, cur_y) = get_cursor_screen_pos();
+                                    let dx = cur_x - start_cx;
+                                    let dy = cur_y - start_cy;
+                                    dock_x = start_wx + dx;
+                                    dock_y = start_wy + dy;
+                                    set_window_bounds(dock_hwnd, dock_x, dock_y, dock_w as i32, dock_h as i32);
+                                    dock_layered.present(dock_hwnd, dock_x, dock_y);
+                                }
+                            } else {
+                                dock.set_mouse_position(Some((position.x as f32, position.y as f32)));
+                                dock_window.request_redraw();
+                            }
                         }
                         WindowEvent::CursorLeft { .. } => {
-                            dock.set_mouse_position(None);
-                            dock_window.request_redraw();
+                            if drag_state.is_none() {
+                                dock.set_mouse_position(None);
+                                dock_window.request_redraw();
+                            }
                         }
                         WindowEvent::MouseInput {
                             state: ElementState::Pressed,
@@ -239,53 +255,76 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             } else if dock.hovered_index.is_some() {
                                 dock.handle_click(&script_engine);
                             } else {
-                                start_window_drag(dock_hwnd);
+                                let (cur_x, cur_y) = get_cursor_screen_pos();
+                                drag_state = Some((window_id, (cur_x, cur_y), (dock_x, dock_y)));
                             }
                         }
-                        WindowEvent::Moved(pos) => {
-                            config.positions.dock_x = Some(pos.x);
-                            config.positions.dock_y = Some(pos.y);
-                            let _ = config.save();
+                        WindowEvent::MouseInput {
+                            state: ElementState::Released,
+                            button: MouseButton::Left,
+                            ..
+                        } => {
+                            if drag_state.is_some() {
+                                drag_state = None;
+                                config.positions.dock_x = Some(dock_x);
+                                config.positions.dock_y = Some(dock_y);
+                                let _ = config.save();
+                            }
                         }
                         WindowEvent::RedrawRequested => {
-                            let size = dock_window.inner_size();
-                            if let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) {
-                                let _ = dock_surface.resize(w, h);
-                                if let Ok(mut buffer) = dock_surface.buffer_mut() {
-                                    if let Some(mut pixmap) = Pixmap::new(size.width, size.height) {
-                                        pixmap.fill(Color::TRANSPARENT);
-                                        dock.render(&mut pixmap.as_mut(), &mut font_renderer);
-                                        copy_pixmap_to_softbuffer(&pixmap, &mut buffer);
-                                        let _ = buffer.present();
-                                    }
-                                }
+                            if let Some(mut pixmap) = Pixmap::new(dock_w as u32, dock_h as u32) {
+                                pixmap.fill(Color::TRANSPARENT);
+                                dock.render(&mut pixmap.as_mut(), &mut font_renderer);
+                                dock_layered.copy_from_pixmap(&pixmap);
+                                dock_layered.present(dock_hwnd, dock_x, dock_y);
                             }
                         }
                         _ => {}
                     }
                 }
-                // --- NOTCH EVENTS ---
+                // --- TOP NOTCH WINDOW EVENTS ---
                 else if window_id == notch_window.id() {
                     match window_event {
                         WindowEvent::CursorMoved { position, .. } => {
-                            notch.set_mouse_position(Some((position.x as f32, position.y as f32)));
-                            notch_window.request_redraw();
+                            if let Some((drag_id, (start_cx, start_cy), (start_wx, start_wy))) = drag_state {
+                                if drag_id == window_id {
+                                    let (cur_x, cur_y) = get_cursor_screen_pos();
+                                    let dx = cur_x - start_cx;
+                                    let dy = cur_y - start_cy;
+                                    notch_x = start_wx + dx;
+                                    notch_y = start_wy + dy;
+                                    let nw = notch.width_spring.value.round() as i32;
+                                    let nh = notch.height_spring.value.round() as i32;
+                                    set_window_bounds(notch_hwnd, notch_x, notch_y, nw, nh);
+                                    notch_layered.present(notch_hwnd, notch_x, notch_y);
+                                }
+                            } else {
+                                notch.set_mouse_position(Some((position.x as f32, position.y as f32)));
+                                notch_window.request_redraw();
+                            }
                         }
                         WindowEvent::CursorEntered { .. } => {
                             notch.set_hovered(true);
                             let expanded_w = 540;
                             let expanded_h = 160;
-                            let notch_x = (geometry.screen_width - expanded_w) / 2;
-                            set_window_bounds(notch_hwnd, notch_x, 0, expanded_w, expanded_h);
+                            let nx = (geometry.screen_width - expanded_w) / 2;
+                            set_window_bounds(notch_hwnd, nx, 0, expanded_w, expanded_h);
                             notch_window.request_redraw();
                         }
                         WindowEvent::CursorLeft { .. } => {
-                            notch.set_hovered(false);
-                            notch.set_mouse_position(None);
-                            let idle_w = 220;
-                            let idle_h = 34;
-                            let notch_x = (geometry.screen_width - idle_w) / 2;
-                            set_window_bounds(notch_hwnd, notch_x, 0, idle_w, idle_h);
+                            if drag_state.is_none() {
+                                notch.set_hovered(false);
+                                notch.set_mouse_position(None);
+                                let idle_w = 220;
+                                let idle_h = 34;
+                                let nx = (geometry.screen_width - idle_w) / 2;
+                                set_window_bounds(notch_hwnd, nx, 0, idle_w, idle_h);
+                                notch_window.request_redraw();
+                            }
+                        }
+                        WindowEvent::DroppedFile(path) => {
+                            println!("[OxideShell Shelf] File dropped on Notch: {:?}", path);
+                            notch.set_hovered(true);
                             notch_window.request_redraw();
                         }
                         WindowEvent::MouseInput {
@@ -313,49 +352,79 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ..
                         } => {
                             let (sx, sy) = get_cursor_screen_pos();
-                            let clicked_close = notch.handle_click(sx as f32, sy as f32);
-                            if clicked_close {
-                                let idle_w = 220;
-                                let idle_h = 34;
-                                let notch_x = (geometry.screen_width - idle_w) / 2;
-                                set_window_bounds(notch_hwnd, notch_x, 0, idle_w, idle_h);
-                            } else if !notch.is_hovered {
-                                start_window_drag(notch_hwnd);
+                            let rel_x = (sx - notch_x) as f32;
+                            let rel_y = (sy - notch_y) as f32;
+
+                            if notch.is_hovering_close {
+                                if notch.is_hovered {
+                                    notch.set_hovered(false);
+                                    let idle_w = 220;
+                                    let idle_h = 34;
+                                    let nx = (geometry.screen_width - idle_w) / 2;
+                                    set_window_bounds(notch_hwnd, nx, 0, idle_w, idle_h);
+                                } else {
+                                    config.shell.notch_enabled = false;
+                                    notch_window.set_visible(false);
+                                    let _ = config.save();
+                                }
+                            } else if notch.is_hovered {
+                                notch.handle_click(rel_x, rel_y);
+                            } else {
+                                let (cur_x, cur_y) = get_cursor_screen_pos();
+                                drag_state = Some((window_id, (cur_x, cur_y), (notch_x, notch_y)));
                             }
                             notch_window.request_redraw();
                         }
-                        WindowEvent::Moved(pos) => {
-                            config.positions.notch_x = Some(pos.x);
-                            config.positions.notch_y = Some(pos.y);
-                            let _ = config.save();
+                        WindowEvent::MouseInput {
+                            state: ElementState::Released,
+                            button: MouseButton::Left,
+                            ..
+                        } => {
+                            if drag_state.is_some() {
+                                drag_state = None;
+                                config.positions.notch_x = Some(notch_x);
+                                config.positions.notch_y = Some(notch_y);
+                                let _ = config.save();
+                            }
                         }
                         WindowEvent::RedrawRequested => {
-                            let size = notch_window.inner_size();
-                            if let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) {
-                                let _ = notch_surface.resize(w, h);
-                                if let Ok(mut buffer) = notch_surface.buffer_mut() {
-                                    if let Some(mut pixmap) = Pixmap::new(size.width, size.height) {
-                                        pixmap.fill(Color::TRANSPARENT);
-                                        notch.render(&mut pixmap.as_mut(), &mut font_renderer);
-                                        copy_pixmap_to_softbuffer(&pixmap, &mut buffer);
-                                        let _ = buffer.present();
-                                    }
-                                }
+                            let nw = (notch.width_spring.value.round() as u32).max(1);
+                            let nh = (notch.height_spring.value.round() as u32).max(1);
+                            if let Some(mut pixmap) = Pixmap::new(nw, nh) {
+                                pixmap.fill(Color::TRANSPARENT);
+                                notch.render(&mut pixmap.as_mut(), &mut font_renderer);
+                                let _ = notch_layered.resize(nw, nh);
+                                notch_layered.copy_from_pixmap(&pixmap);
+                                notch_layered.present(notch_hwnd, notch_x, notch_y);
                             }
                         }
                         _ => {}
                     }
                 }
-                // --- WIDGETS EVENTS ---
+                // --- DESKTOP WIDGETS EVENTS ---
                 else if window_id == widgets_window.id() {
                     match window_event {
                         WindowEvent::CursorMoved { position, .. } => {
-                            widgets.set_mouse_position(Some((position.x as f32, position.y as f32)));
-                            widgets_window.request_redraw();
+                            if let Some((drag_id, (start_cx, start_cy), (start_wx, start_wy))) = drag_state {
+                                if drag_id == window_id {
+                                    let (cur_x, cur_y) = get_cursor_screen_pos();
+                                    let dx = cur_x - start_cx;
+                                    let dy = cur_y - start_cy;
+                                    widgets_x = start_wx + dx;
+                                    widgets_y = start_wy + dy;
+                                    set_window_bounds(widgets_hwnd, widgets_x, widgets_y, widgets_w as i32, widgets_h as i32);
+                                    widgets_layered.present(widgets_hwnd, widgets_x, widgets_y);
+                                }
+                            } else {
+                                widgets.set_mouse_position(Some((position.x as f32, position.y as f32)));
+                                widgets_window.request_redraw();
+                            }
                         }
                         WindowEvent::CursorLeft { .. } => {
-                            widgets.set_mouse_position(None);
-                            widgets_window.request_redraw();
+                            if drag_state.is_none() {
+                                widgets.set_mouse_position(None);
+                                widgets_window.request_redraw();
+                            }
                         }
                         WindowEvent::MouseInput {
                             state: ElementState::Pressed,
@@ -383,33 +452,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         } => {
                             let card_closed = widgets.handle_click(&script_engine);
                             if card_closed.is_none() && widgets.mouse_pos.is_some() {
-                                start_window_drag(widgets_hwnd);
+                                let (cur_x, cur_y) = get_cursor_screen_pos();
+                                drag_state = Some((window_id, (cur_x, cur_y), (widgets_x, widgets_y)));
                             }
                             widgets_window.request_redraw();
                         }
-                        WindowEvent::Moved(pos) => {
-                            config.positions.widgets_x = Some(pos.x);
-                            config.positions.widgets_y = Some(pos.y);
-                            let _ = config.save();
+                        WindowEvent::MouseInput {
+                            state: ElementState::Released,
+                            button: MouseButton::Left,
+                            ..
+                        } => {
+                            if drag_state.is_some() {
+                                drag_state = None;
+                                config.positions.widgets_x = Some(widgets_x);
+                                config.positions.widgets_y = Some(widgets_y);
+                                let _ = config.save();
+                            }
                         }
                         WindowEvent::RedrawRequested => {
-                            let size = widgets_window.inner_size();
-                            if let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) {
-                                let _ = widgets_surface.resize(w, h);
-                                if let Ok(mut buffer) = widgets_surface.buffer_mut() {
-                                    if let Some(mut pixmap) = Pixmap::new(size.width, size.height) {
-                                        pixmap.fill(Color::TRANSPARENT);
-                                        widgets.render(&mut pixmap.as_mut(), &mut font_renderer);
-                                        copy_pixmap_to_softbuffer(&pixmap, &mut buffer);
-                                        let _ = buffer.present();
-                                    }
-                                }
+                            if let Some(mut pixmap) = Pixmap::new(widgets_w as u32, widgets_h as u32) {
+                                pixmap.fill(Color::TRANSPARENT);
+                                widgets.render(&mut pixmap.as_mut(), &mut font_renderer);
+                                widgets_layered.copy_from_pixmap(&pixmap);
+                                widgets_layered.present(widgets_hwnd, widgets_x, widgets_y);
                             }
                         }
                         _ => {}
                     }
                 }
-                // --- DYNAMIC LAUNCHER EVENTS ---
+                // --- DYNAMIC SPOTLIGHT LAUNCHER EVENTS ---
                 else if let Some(ref l_win) = launcher_window {
                     if window_id == l_win.id() {
                         match window_event {
@@ -427,13 +498,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     Key::Named(NamedKey::Escape) => {
                                         launcher.close();
                                         launcher_window = None;
-                                        launcher_surface = None;
+                                        launcher_layered = None;
                                         trim_working_set();
                                     }
                                     Key::Named(NamedKey::Enter) => {
                                         launcher.launch_selected();
                                         launcher_window = None;
-                                        launcher_surface = None;
+                                        launcher_layered = None;
                                         trim_working_set();
                                     }
                                     Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::ArrowRight) => {
@@ -459,16 +530,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             WindowEvent::RedrawRequested => {
-                                if let Some(ref mut l_surf) = launcher_surface {
-                                    let size = l_win.inner_size();
-                                    if let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) {
-                                        let _ = l_surf.resize(w, h);
-                                        if let Ok(mut buffer) = l_surf.buffer_mut() {
-                                            if let Some(pixmap) = launcher.render(&mut font_renderer) {
-                                                copy_pixmap_to_softbuffer(pixmap, &mut buffer);
-                                                let _ = buffer.present();
-                                            }
-                                        }
+                                if let Some(ref mut l_surf) = launcher_layered {
+                                    if let Some(pixmap) = launcher.render(&mut font_renderer) {
+                                        l_surf.copy_from_pixmap(pixmap);
+                                        let lx = initial_layout.launcher_rect.left;
+                                        let ly = initial_layout.launcher_rect.top;
+                                        l_surf.present(get_hwnd(l_win), lx, ly);
                                     }
                                 }
                             }
@@ -482,7 +549,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let dt = now.duration_since(last_frame).as_secs_f32().min(0.05);
                 last_frame = now;
 
-                // 1. Check if Rhai script requested to toggle Launcher
+                // 1. Check if Rhai script or hotkey requested to toggle Launcher
                 let mut should_toggle_launcher = false;
                 if let Ok(mut flag) = script_engine.pending_toggle_launcher.lock() {
                     if *flag {
@@ -495,7 +562,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if launcher.is_open {
                         launcher.close();
                         launcher_window = None;
-                        launcher_surface = None;
+                        launcher_layered = None;
                         trim_working_set();
                     } else {
                         launcher.open();
@@ -517,8 +584,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let win_hwnd = get_hwnd(&win);
                             apply_acrylic_glass_and_strip_chrome(win_hwnd, true);
                             set_window_bounds(win_hwnd, lx, ly, lw as i32, lh as i32);
-                            if let Ok(surf) = Surface::new(&context, win.clone()) {
-                                launcher_surface = Some(surf);
+                            if let Ok(surf) = LayeredSurface::new(lw as u32, lh as u32) {
+                                launcher_layered = Some(surf);
                                 win.request_redraw();
                             }
                             launcher_window = Some(win);
@@ -557,17 +624,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     notch_window.request_redraw();
                 }
 
-                let needs_animation = dock_anim || notch_anim;
-
-                // 4. Strict CPU Budget: Wait when idle, WaitUntil(16ms) only when animating
-                if needs_animation {
-                    elwt.set_control_flow(ControlFlow::WaitUntil(
-                        Instant::now() + Duration::from_millis(16),
-                    ));
+                // 4. ControlFlow::Wait event loop saves battery and maintains 0.0% CPU when idle
+                if dock_anim || notch_anim || launcher.is_open || drag_state.is_some() {
+                    elwt.set_control_flow(ControlFlow::Poll);
                 } else {
-                    elwt.set_control_flow(ControlFlow::WaitUntil(
-                        Instant::now() + Duration::from_millis(1000),
-                    ));
+                    elwt.set_control_flow(ControlFlow::WaitUntil(now + Duration::from_millis(1000)));
                 }
             }
             _ => {}
@@ -589,6 +650,18 @@ fn handle_context_menu_choice(
     elwt: &winit::event_loop::EventLoopWindowTarget<()>,
 ) {
     match choice {
+        ContextMenuChoice::ShowAllModules => {
+            config.shell.notch_enabled = true;
+            config.shell.widgets_enabled = true;
+            config.shell.dock_enabled = true;
+            notch_window.set_visible(true);
+            widgets_window.set_visible(true);
+            dock_window.set_visible(true);
+            let _ = config.save();
+            dock_window.request_redraw();
+            notch_window.request_redraw();
+            widgets_window.request_redraw();
+        }
         ContextMenuChoice::ToggleNotch => {
             config.shell.notch_enabled = !config.shell.notch_enabled;
             notch_window.set_visible(config.shell.notch_enabled);
@@ -604,11 +677,20 @@ fn handle_context_menu_choice(
             dock_window.set_visible(config.shell.dock_enabled);
             let _ = config.save();
         }
+        ContextMenuChoice::RegenerateWallpaper => {
+            let gen = WallpaperGenerator::default();
+            let _ = gen.generate_and_apply();
+        }
+        ContextMenuChoice::EditScripts => {
+            let _ = Command::new("explorer.exe")
+                .arg(OxideConfig::scripts_dir())
+                .spawn();
+        }
         ContextMenuChoice::ResetPositions => {
             config.positions = Default::default();
             let _ = config.save();
 
-            let layout = LayoutSolver::solve(geometry, 440);
+            let layout = LayoutSolver::solve(geometry, 680);
             let d_hwnd = get_hwnd(dock_window);
             let n_hwnd = get_hwnd(notch_window);
             let w_hwnd = get_hwnd(widgets_window);

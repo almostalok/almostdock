@@ -88,19 +88,15 @@ fn test_typography_metrics_and_draw() {
 #[test]
 fn test_wallpaper_procedural_generation() {
     let gen = WallpaperGenerator::new(640, 360);
-    let bytes = gen.generate_bmp_bytes();
+    let temp_path = std::env::temp_dir().join("test_wallpaper.png");
+    let res = gen.generate_and_save_png(&temp_path);
+    assert!(res.is_ok());
 
-    // BMP magic "BM"
-    assert_eq!(&bytes[0..2], b"BM");
-
-    // BMP minimum header size is 54 bytes
-    assert!(bytes.len() > 54);
-
-    let unpadded_row = 640 * 3;
-    let expected_row_padding = if unpadded_row % 4 == 0 { 0 } else { 4 - (unpadded_row % 4) };
-    let expected_row_size = 640 * 3 + expected_row_padding;
-    let expected_file_size = 54 + expected_row_size * 360;
-    assert_eq!(bytes.len(), expected_file_size);
+    let bytes = std::fs::read(&temp_path).expect("Failed to read generated PNG");
+    // PNG Magic signature: 137, 80, 78, 71, 13, 10, 26, 10
+    assert_eq!(&bytes[0..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+    assert!(bytes.len() > 1000);
+    let _ = std::fs::remove_file(&temp_path);
 }
 
 #[test]
@@ -128,8 +124,13 @@ fn test_dock_magnification_physics() {
     }
 
     // Hover over the center of the first item
-    let first_item_center = 16.0 + (dock.base_size * 1.0) / 2.0;
-    dock.set_mouse_position(Some((first_item_center, 38.0)));
+    let total_items = dock.items.len();
+    let spacing = 12.0;
+    let content_w = (total_items as f32) * dock.base_size + ((total_items - 1) as f32) * spacing;
+    let start_x = (dock.width - content_w) / 2.0;
+    let first_item_center = start_x + dock.base_size / 2.0;
+
+    dock.set_mouse_position(Some((first_item_center, 50.0)));
     dock.update(1.0 / 60.0);
 
     // The hovered item target scale should equal max_scale

@@ -141,11 +141,11 @@ impl LayoutSolver {
         let widget_y = 52;
         let widget_rect = Rect::from_xywh(widget_x, widget_y, widget_w, widget_h);
 
-        // 3. Bottom Dock (centered horizontally, y = work_bottom - 84, w = dock_w, h = 76)
-        let dock_w = dock_width.max(380);
-        let dock_h = 76;
+        // 3. Bottom Dock (width = 680, height = 116, y = work_bottom - 116)
+        let dock_w = dock_width.max(680);
+        let dock_h = 116;
         let dock_x = (geo.screen_width - dock_w) / 2;
-        let dock_y = geo.work_bottom - 84;
+        let dock_y = geo.work_bottom - dock_h;
         let dock_rect = Rect::from_xywh(dock_x, dock_y, dock_w, dock_h);
 
         // 4. App Launcher (centered on screen: 720 x 480)
